@@ -6,20 +6,20 @@ import shutil
 import copy
 import warnings
 import tempfile
+from io import BytesIO
 from openpyxl import load_workbook
 
 # Ignorar avisos do openpyxl
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
 # ================= CONFIGURAÇÕES DE LAYOUT =================
-# O modelo deve estar na mesma pasta do script no GitHub
 NOME_MODELO_PADRAO = "MODELO.xlsx" 
 
 LINHA_INICIAL_DADOS = 7  
 PASSO_ENTRE_ROTAS = 4    
 MARGEM_COLUNAS = 2       
 
-# ================= FUNÇÕES DE ESTILO (MANTIDAS) =================
+# ================= FUNÇÕES DE ESTILO =================
 def formatar_cidade(texto):
     if pd.isna(texto) or str(texto).strip() == "":
         return None
@@ -64,17 +64,27 @@ def preparar_estrutura_linhas(ws, total_rotas):
     ultima_linha_necessaria = LINHA_INICIAL_DADOS + (total_rotas * PASSO_ENTRE_ROTAS)
     max_row_excel = ws.max_row
     
-    if ultima_linha_necessaria > max_row_excel:
-        linha_atual_verificacao = LINHA_INICIAL_DADOS
-        rotas_formatadas_existentes = 0
-        while True:
-            cell = ws.cell(row=linha_atual_verificacao, column=2)
-            if not cell.border.left.style and linha_atual_verificacao > max_row_excel:
-                break
-            rotas_formatadas_existentes += 1
-            linha_atual_verificacao += PASSO_ENTRE_ROTAS
-        
-        rotas_faltantes = total_rotas - rotas_formatadas_existentes + 5 
+    # Lógica de verificação: olha se existem linhas formatadas suficientes
+    linha_atual_verificacao = LINHA_INICIAL_DADOS
+    rotas_formatadas_existentes = 0
+    
+    # Percorre para contar quantas rotas já têm "caixinha azul" (borda esquerda)
+    while True:
+        if linha_atual_verificacao > max_row_excel + 100: # Limite de segurança para loop infinito
+            break
+            
+        cell = ws.cell(row=linha_atual_verificacao, column=2)
+        # Se não tiver borda ou estilo, assumimos que acabou o template
+        if not cell.border.left.style: 
+            break
+            
+        rotas_formatadas_existentes += 1
+        linha_atual_verificacao += PASSO_ENTRE_ROTAS
+    
+    # AQUI ESTAVA O BUG: Aumentamos a margem de segurança de +5 para +50
+    # Isso garante que ele crie muitas linhas a mais antes de escrever
+    if rotas_formatadas_existentes < total_rotas + 10:
+        rotas_faltantes = (total_rotas - rotas_formatadas_existentes) + 50 
         linha_destino = linha_atual_verificacao
         
         for _ in range(rotas_faltantes):
@@ -108,8 +118,9 @@ def escrever_valor(ws, row, col_inicial, valor):
 def limpar_sobras_total(ws, ultima_linha_usada, ultima_coluna_usada):
     linha_inicio_corte = ultima_linha_usada + PASSO_ENTRE_ROTAS
     max_row = ws.max_row
+    # Margem extra antes de cortar para evitar cortar a última borda
     if max_row >= linha_inicio_corte:
-        qtd_linhas_apagar = (max_row - linha_inicio_corte) + 100
+        qtd_linhas_apagar = (max_row - linha_inicio_corte) + 200
         ws.delete_rows(linha_inicio_corte, qtd_linhas_apagar)
 
     coluna_inicio_corte = ultima_coluna_usada + MARGEM_COLUNAS + 1
@@ -166,6 +177,7 @@ def processar_arquivo(caminho_arquivo, dataframe):
     ultima_linha_real = linha_atual - PASSO_ENTRE_ROTAS
     limpar_sobras_total(ws, ultima_linha_real, max_col_global)
     ajustar_largura_colunas(ws)
+    
     wb.save(caminho_arquivo)
     return True
 
@@ -173,73 +185,100 @@ def processar_arquivo(caminho_arquivo, dataframe):
 
 def main():
     st.set_page_config(page_title="Gerador de Rotas", layout="centered")
-    st.title("🚛 Gerador de Previsão de Descarga")
-    st.markdown("Faça o upload da planilha base para gerar os arquivos formatados.")
+    st.title("🚛 Previsão de Descarga")
 
-    # 1. Verifica se o MODELO.xlsx existe na pasta do script
+    # Verifica se o MODELO.xlsx existe
     if not os.path.exists(NOME_MODELO_PADRAO):
-        st.error(f"ERRO CRÍTICO: O arquivo '{NOME_MODELO_PADRAO}' não foi encontrado na raiz do site.")
-        st.info("Por favor, adicione o arquivo MODELO.xlsx ao repositório do GitHub.")
+        st.error(f"ERRO CRÍTICO: '{NOME_MODELO_PADRAO}' não encontrado.")
         return
 
-    # 2. Upload do arquivo
+    # --- INICIALIZAÇÃO DO ESTADO (SESSION STATE) ---
+    # Isso garante que os dados fiquem salvos mesmo após clicar em baixar
+    if 'arquivos_prontos' not in st.session_state:
+        st.session_state['arquivos_prontos'] = []
+
+    # Upload
     arquivo_upload = st.file_uploader("Selecione a planilha de dados (Excel)", type=["xlsx"])
 
+    # Botão de resetar (caso queira limpar a tela e começar de novo)
+    if st.session_state['arquivos_prontos']:
+        if st.button("🔄 Limpar e Processar Nova Planilha"):
+            st.session_state['arquivos_prontos'] = []
+            st.rerun()
+
     if arquivo_upload is not None:
-        if st.button("Processar Arquivos"):
-            with st.spinner('Processando... Aguarde.'):
-                # Cria um diretório temporário para trabalhar
-                with tempfile.TemporaryDirectory() as tmpdirname:
-                    
-                    # Salva o arquivo de upload no temp para o pandas ler
-                    caminho_input = os.path.join(tmpdirname, "input.xlsx")
-                    with open(caminho_input, "wb") as f:
-                        f.write(arquivo_upload.getbuffer())
-
-                    try:
-                        df = pd.read_excel(caminho_input)
-                        df.columns = [str(c).strip().lower() for c in df.columns]
-                    except Exception as e:
-                        st.error(f"Erro ao ler arquivo: {e}")
-                        return
-
-                    col_transp = next((c for c in df.columns if "transportadora" in c), None)
-                    if not col_transp:
-                        st.error("Erro: Coluna 'transportadora' não encontrada na planilha.")
-                        return
-
-                    # Lista para guardar os arquivos gerados para download
-                    arquivos_gerados = []
-
-                    # --- GERA O GERAL ---
-                    caminho_geral = os.path.join(tmpdirname, "GERAL_ROTAS.xlsx")
-                    shutil.copy(NOME_MODELO_PADRAO, caminho_geral) # Copia do modelo original
-                    
-                    if processar_arquivo(caminho_geral, df):
-                        arquivos_gerados.append(("GERAL_ROTAS.xlsx", caminho_geral))
-
-                    # --- GERA POR TRANSPORTADORA ---
-                    for transp, dados in df.groupby(col_transp):
-                        if pd.isna(transp): continue
-                        nome_arquivo = str(transp).replace("/", "-").replace("\\", "").strip() + ".xlsx"
-                        caminho_transp = os.path.join(tmpdirname, nome_arquivo)
+        # Só mostra o botão Processar se ainda não tiver processado
+        if not st.session_state['arquivos_prontos']:
+            if st.button("Processar Arquivos"):
+                with st.spinner('Processando... Aguarde.'):
+                    with tempfile.TemporaryDirectory() as tmpdirname:
                         
-                        shutil.copy(NOME_MODELO_PADRAO, caminho_transp)
-                        if processar_arquivo(caminho_transp, dados):
-                            arquivos_gerados.append((nome_arquivo, caminho_transp))
+                        # Salva input
+                        caminho_input = os.path.join(tmpdirname, "input.xlsx")
+                        with open(caminho_input, "wb") as f:
+                            f.write(arquivo_upload.getbuffer())
 
-                    st.success("Processamento concluído! Baixe os arquivos abaixo:")
-                    st.divider()
+                        try:
+                            df = pd.read_excel(caminho_input)
+                            df.columns = [str(c).strip().lower() for c in df.columns]
+                        except Exception as e:
+                            st.error(f"Erro ao ler arquivo: {e}")
+                            return
 
-                    # --- EXIBE BOTÕES DE DOWNLOAD ---
-                    for nome_arq, caminho_completo in arquivos_gerados:
-                        with open(caminho_completo, "rb") as file:
-                            btn = st.download_button(
-                                label=f"📥 Baixar {nome_arq}",
-                                data=file,
-                                file_name=nome_arq,
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                            )
+                        col_transp = next((c for c in df.columns if "transportadora" in c), None)
+                        if not col_transp:
+                            st.error("Erro: Coluna 'transportadora' não encontrada.")
+                            return
+
+                        lista_temp_arquivos = []
+
+                        # --- GERA O GERAL ---
+                        caminho_geral = os.path.join(tmpdirname, "GERAL_ROTAS.xlsx")
+                        shutil.copy(NOME_MODELO_PADRAO, caminho_geral)
+                        
+                        if processar_arquivo(caminho_geral, df):
+                            # Lê o arquivo gerado para a memória (BytesIO)
+                            with open(caminho_geral, "rb") as f:
+                                dados_binarios = f.read()
+                            lista_temp_arquivos.append({
+                                "nome": "GERAL_ROTAS.xlsx",
+                                "dados": dados_binarios
+                            })
+
+                        # --- GERA POR TRANSPORTADORA ---
+                        for transp, dados in df.groupby(col_transp):
+                            if pd.isna(transp): continue
+                            nome_arquivo = str(transp).replace("/", "-").replace("\\", "").strip() + ".xlsx"
+                            caminho_transp = os.path.join(tmpdirname, nome_arquivo)
+                            
+                            shutil.copy(NOME_MODELO_PADRAO, caminho_transp)
+                            if processar_arquivo(caminho_transp, dados):
+                                with open(caminho_transp, "rb") as f:
+                                    dados_binarios = f.read()
+                                lista_temp_arquivos.append({
+                                    "nome": nome_arquivo,
+                                    "dados": dados_binarios
+                                })
+
+                        # Salva tudo na sessão
+                        st.session_state['arquivos_prontos'] = lista_temp_arquivos
+                        st.success("Concluído!")
+                        st.rerun() # Recarrega a página para mostrar os botões
+
+    # --- ÁREA DE DOWNLOAD (FORA DO IF DO BOTÃO) ---
+    # Isso garante que os botões persistam na tela
+    if st.session_state['arquivos_prontos']:
+        st.divider()
+        st.subheader("📂 Arquivos Gerados:")
+        
+        for item in st.session_state['arquivos_prontos']:
+            st.download_button(
+                label=f"📥 Baixar {item['nome']}",
+                data=item['dados'],
+                file_name=item['nome'],
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=item['nome'] # Chave única para não dar conflito
+            )
 
 if __name__ == "__main__":
     main()
