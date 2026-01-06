@@ -14,7 +14,6 @@ warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
 # ================= CONFIGURAÇÕES DE LAYOUT =================
 NOME_MODELO_PADRAO = "MODELO.xlsx" 
-NOME_BASE_CEPS = "MODELO(2).xlsx"
 
 LINHA_INICIAL_DADOS = 7  
 PASSO_ENTRE_ROTAS = 4    
@@ -231,42 +230,6 @@ def main():
                             st.error("Erro: Coluna 'transportadora' não encontrada.")
                             return
 
-                        # --- VERIFICAÇÃO DE FRETE RETORNO ---
-                        if os.path.exists(NOME_BASE_CEPS):
-                            try:
-                                df_base = pd.read_excel(NOME_BASE_CEPS)
-                                # Verifica se tem colunas suficientes (D=3, E=4)
-                                if df_base.shape[1] >= 5:
-                                    def clean_cep(c):
-                                        return re.sub(r'\D', '', str(c)) if pd.notna(c) else ''
-
-                                    base_map = {}
-                                    for _, row_b in df_base.iterrows():
-                                        forn = row_b.iloc[3] # Coluna D (índice 3)
-                                        cep_b = row_b.iloc[4] # Coluna E (índice 4)
-                                        cep_clean = clean_cep(cep_b)
-                                        if cep_clean:
-                                            if cep_clean not in base_map:
-                                                base_map[cep_clean] = set()
-                                            base_map[cep_clean].add(str(forn))
-                                    
-                                    # Verifica input (Coluna AA = 27ª coluna = índice 26)
-                                    if df.shape[1] > 26:
-                                        ceps_alertas = []
-                                        col_aa = df.iloc[:, 26]
-                                        for idx_r, val_aa in col_aa.items():
-                                            c_in = clean_cep(val_aa)
-                                            if c_in and c_in in base_map:
-                                                fornecedores_encontrados = ", ".join(base_map[c_in])
-                                                ceps_alertas.append(f"CEP {val_aa} (Linha {idx_r+2}) -> Fornecedor: {fornecedores_encontrados}")
-                                        
-                                        if ceps_alertas:
-                                            st.warning("🚨 **ATENÇÃO: FRETE RETORNO IDENTIFICADO**")
-                                            st.write("Os seguintes CEPs da coluna AA constam na base de Frete Retorno. **Verifique qual o FORNECEDOR / CD CORRETO:**")
-                                            st.dataframe(pd.DataFrame(ceps_alertas, columns=["Detalhes do Alerta"]), hide_index=True)
-                            except Exception as e:
-                                st.error(f"Erro na verificação de frete retorno: {e}")
-
                         lista_temp_arquivos = []
 
                         # --- GERA O GERAL ---
@@ -319,3 +282,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
