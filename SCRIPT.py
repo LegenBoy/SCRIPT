@@ -6,6 +6,7 @@ import shutil
 import copy
 import warnings
 import tempfile
+import urllib.parse
 from io import BytesIO
 from openpyxl import load_workbook
 
@@ -14,12 +15,13 @@ warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
 # ================= CONFIGURAÇÕES DE LAYOUT =================
 NOME_MODELO_PADRAO = "MODELO.xlsx" 
+RELACAO_EMAILS = "Relação E-mail Transportadoras.xlsx"
 
-LINHA_INICIAL_DADOS = 7  
+LINHA_INICIAL_DADOS = 7 
 PASSO_ENTRE_ROTAS = 4    
-MARGEM_COLUNAS = 2       
+MARGEM_COLUNAS = 2        
 
-# ================= FUNÇÕES DE ESTILO =================
+# ================= FUNÇÕES DE APOIO =================
 def formatar_cidade(texto):
     if pd.isna(texto) or str(texto).strip() == "":
         return None
@@ -30,6 +32,41 @@ def formatar_cidade(texto):
         return f"{match.group(2).strip()} - {match.group(1)}"
     return texto
 
+def carregar_dicionario_emails():
+    """Lê a planilha de e-mails e agrupa por transportadora."""
+    if not os.path.exists(RELACAO_EMAILS):
+        return {}
+    try:
+        df_em = pd.read_excel(RELACAO_EMAILS)
+        # Padroniza nomes para evitar erros de digitação (maiúsculas e sem espaços extras)
+        df_em['TRANSPORTADORA'] = df_em['TRANSPORTADORA'].astype(str).str.strip().str.upper()
+        df_em['E-MAIL'] = df_em['E-MAIL'].astype(str).str.strip()
+        
+        # Agrupa e-mails da mesma transportadora separados por ponto e vírgula
+        return df_em.groupby('TRANSPORTADORA')['E-MAIL'].apply(lambda x: ';'.join(x)).to_dict()
+    except Exception as e:
+        st.error(f"Erro ao carregar dicionário de e-mails: {e}")
+        return {}
+
+def gerar_link_outlook(transportadora, data_carregamento, destinatarios):
+    """Gera o link de deeplink para o Outlook Web."""
+    assunto = f"Zema - Previsão de Descarga {data_carregamento}"
+    corpo = (
+        "Prezados, Bom Dia!\n\n"
+        "Segue previsão de descarga referente carregamento de hoje.\n\n"
+        "Dúvidas estou à disposição.\n\n"
+        "Obrigado."
+    )
+    
+    params = urllib.parse.urlencode({
+        'path': '/mail/action/compose',
+        'to': destinatarios,
+        'subject': assunto,
+        'body': corpo
+    })
+    return f"https://outlook.cloud.microsoft/mail/0/deeplink/compose?{params}"
+
+# ================= FUNÇÕES DE ESTILO EXCEL =================
 def copiar_estilo(celula_origem, celula_destino):
     if celula_origem.has_style:
         celula_destino.font = copy.copy(celula_origem.font)
@@ -61,32 +98,20 @@ def replicar_bloco_formatacao(ws, linha_base, linha_nova_inicio, altura_bloco):
         )
 
 def preparar_estrutura_linhas(ws, total_rotas):
-    ultima_linha_necessaria = LINHA_INICIAL_DADOS + (total_rotas * PASSO_ENTRE_ROTAS)
-    max_row_excel = ws.max_row
-    
-    # Lógica de verificação: olha se existem linhas formatadas suficientes
     linha_atual_verificacao = LINHA_INICIAL_DADOS
     rotas_formatadas_existentes = 0
+    max_row_excel = ws.max_row
     
-    # Percorre para contar quantas rotas já têm "caixinha azul" (borda esquerda)
     while True:
-        if linha_atual_verificacao > max_row_excel + 100: # Limite de segurança para loop infinito
-            break
-            
+        if linha_atual_verificacao > max_row_excel + 100: break
         cell = ws.cell(row=linha_atual_verificacao, column=2)
-        # Se não tiver borda ou estilo, assumimos que acabou o template
-        if not cell.border.left.style: 
-            break
-            
+        if not cell.border.left.style: break
         rotas_formatadas_existentes += 1
         linha_atual_verificacao += PASSO_ENTRE_ROTAS
     
-    # AQUI ESTAVA O BUG: Aumentamos a margem de segurança de +5 para +50
-    # Isso garante que ele crie muitas linhas a mais antes de escrever
     if rotas_formatadas_existentes < total_rotas + 10:
         rotas_faltantes = (total_rotas - rotas_formatadas_existentes) + 50 
         linha_destino = linha_atual_verificacao
-        
         for _ in range(rotas_faltantes):
             replicar_bloco_formatacao(ws, LINHA_INICIAL_DADOS, linha_destino, PASSO_ENTRE_ROTAS)
             linha_destino += PASSO_ENTRE_ROTAS
@@ -104,30 +129,20 @@ def escrever_valor(ws, row, col_inicial, valor):
         merged_range = obter_range_mesclado(ws, row, col_atual)
         if merged_range:
             if row == merged_range.min_row and col_atual == merged_range.min_col:
-                celula = ws.cell(row, col_atual)
-                celula.value = valor
+                ws.cell(row, col_atual).value = valor
                 return merged_range.max_col + 1
-            else:
-                col_atual = merged_range.max_col + 1
-                continue
+            col_atual = merged_range.max_col + 1
         else:
-            celula = ws.cell(row, col_atual)
-            celula.value = valor
+            ws.cell(row, col_atual).value = valor
             return col_atual + 1
 
 def limpar_sobras_total(ws, ultima_linha_usada, ultima_coluna_usada):
     linha_inicio_corte = ultima_linha_usada + PASSO_ENTRE_ROTAS
-    max_row = ws.max_row
-    # Margem extra antes de cortar para evitar cortar a última borda
-    if max_row >= linha_inicio_corte:
-        qtd_linhas_apagar = (max_row - linha_inicio_corte) + 200
-        ws.delete_rows(linha_inicio_corte, qtd_linhas_apagar)
-
+    if ws.max_row >= linha_inicio_corte:
+        ws.delete_rows(linha_inicio_corte, (ws.max_row - linha_inicio_corte) + 200)
     coluna_inicio_corte = ultima_coluna_usada + MARGEM_COLUNAS + 1
-    max_col = ws.max_column
-    if max_col >= coluna_inicio_corte:
-        qtd_cols_apagar = (max_col - coluna_inicio_corte) + 50
-        ws.delete_cols(coluna_inicio_corte, qtd_cols_apagar)
+    if ws.max_column >= coluna_inicio_corte:
+        ws.delete_cols(coluna_inicio_corte, (ws.max_column - coluna_inicio_corte) + 50)
 
 def ajustar_largura_colunas(ws):
     for col in ws.columns:
@@ -136,25 +151,20 @@ def ajustar_largura_colunas(ws):
         for cell in col:
             try:
                 if cell.value:
-                    if len(str(cell.value)) > max_length:
-                        max_length = len(str(cell.value))
-            except:
-                pass
+                    max_length = max(max_length, len(str(cell.value)))
+            except: pass
         if max_length > 0:
             ws.column_dimensions[column].width = max_length + 3
 
 def processar_arquivo(caminho_arquivo, dataframe):
     try:
         wb = load_workbook(caminho_arquivo)
-        if "MODELO" in wb.sheetnames: ws = wb["MODELO"]
-        elif "IMPRESSÃO" in wb.sheetnames: ws = wb["IMPRESSÃO"]
-        else: ws = wb.active
+        ws = wb["MODELO"] if "MODELO" in wb.sheetnames else (wb["IMPRESSÃO"] if "IMPRESSÃO" in wb.sheetnames else wb.active)
     except Exception as e:
         st.error(f"Erro ao abrir modelo: {e}")
         return False
 
     preparar_estrutura_linhas(ws, len(dataframe))
-
     linha_atual = LINHA_INICIAL_DADOS
     max_col_global = 2 
 
@@ -163,21 +173,15 @@ def processar_arquivo(caminho_arquivo, dataframe):
         for i in range(1, 13):
             col_nome = f"filial{i}/cubagem"
             if col_nome in dataframe.columns:
-                valor = row[col_nome]
-                cidade_fmt = formatar_cidade(valor)
+                cidade_fmt = formatar_cidade(row[col_nome])
                 if cidade_fmt:
                     coluna_cursor = escrever_valor(ws, linha_atual, coluna_cursor, cidade_fmt)
         
-        coluna_usada_nesta_linha = coluna_cursor - 1
-        if coluna_usada_nesta_linha > max_col_global:
-            max_col_global = coluna_usada_nesta_linha
-            
+        max_col_global = max(max_col_global, coluna_cursor - 1)
         linha_atual += PASSO_ENTRE_ROTAS
 
-    ultima_linha_real = linha_atual - PASSO_ENTRE_ROTAS
-    limpar_sobras_total(ws, ultima_linha_real, max_col_global)
+    limpar_sobras_total(ws, linha_atual - PASSO_ENTRE_ROTAS, max_col_global)
     ajustar_largura_colunas(ws)
-    
     wb.save(caminho_arquivo)
     return True
 
@@ -187,99 +191,107 @@ def main():
     st.set_page_config(page_title="Gerador de Rotas", layout="centered")
     st.title("🚛 Previsão de Descarga")
 
-    # Verifica se o MODELO.xlsx existe
     if not os.path.exists(NOME_MODELO_PADRAO):
-        st.error(f"ERRO CRÍTICO: '{NOME_MODELO_PADRAO}' não encontrado.")
+        st.error(f"ERRO: '{NOME_MODELO_PADRAO}' não encontrado.")
         return
 
-    # --- INICIALIZAÇÃO DO ESTADO (SESSION STATE) ---
-    # Isso garante que os dados fiquem salvos mesmo após clicar em baixar
+    # Inicializa estados
     if 'arquivos_prontos' not in st.session_state:
         st.session_state['arquivos_prontos'] = []
+    if 'data_carregamento' not in st.session_state:
+        st.session_state['data_carregamento'] = "Data"
 
-    # Upload
+    contatos_dict = carregar_dicionario_emails()
     arquivo_upload = st.file_uploader("Selecione a planilha de dados (Excel)", type=["xlsx"])
 
-    # Botão de resetar (caso queira limpar a tela e começar de novo)
     if st.session_state['arquivos_prontos']:
-        if st.button("🔄 Limpar e Processar Nova Planilha"):
+        if st.button("🔄 Novo Processamento"):
             st.session_state['arquivos_prontos'] = []
             st.rerun()
 
-    if arquivo_upload is not None:
-        # Só mostra o botão Processar se ainda não tiver processado
-        if not st.session_state['arquivos_prontos']:
-            if st.button("Processar Arquivos"):
-                with st.spinner('Processando... Aguarde.'):
-                    with tempfile.TemporaryDirectory() as tmpdirname:
-                        
-                        # Salva input
-                        caminho_input = os.path.join(tmpdirname, "input.xlsx")
-                        with open(caminho_input, "wb") as f:
-                            f.write(arquivo_upload.getbuffer())
+    if arquivo_upload is not None and not st.session_state['arquivos_prontos']:
+        if st.button("Processar Arquivos"):
+            with st.spinner('Processando...'):
+                with tempfile.TemporaryDirectory() as tmpdirname:
+                    caminho_input = os.path.join(tmpdirname, "input.xlsx")
+                    with open(caminho_input, "wb") as f:
+                        f.write(arquivo_upload.getbuffer())
 
-                        try:
-                            df = pd.read_excel(caminho_input)
-                            df.columns = [str(c).strip().lower() for c in df.columns]
-                        except Exception as e:
-                            st.error(f"Erro ao ler arquivo: {e}")
-                            return
+                    try:
+                        df = pd.read_excel(caminho_input)
+                        # Captura a data da primeira linha, primeira coluna para o e-mail
+                        st.session_state['data_carregamento'] = str(df.iloc[0, 0])[:10]
+                        df.columns = [str(c).strip().lower() for c in df.columns]
+                    except:
+                        st.error("Erro ao ler arquivo.")
+                        return
 
-                        col_transp = next((c for c in df.columns if "transportadora" in c), None)
-                        if not col_transp:
-                            st.error("Erro: Coluna 'transportadora' não encontrada.")
-                            return
+                    col_transp = next((c for c in df.columns if "transportadora" in c), None)
+                    if not col_transp:
+                        st.error("Coluna 'transportadora' não encontrada.")
+                        return
 
-                        lista_temp_arquivos = []
+                    lista_arquivos = []
+                    
+                    # Geral
+                    caminho_geral = os.path.join(tmpdirname, "GERAL_ROTAS.xlsx")
+                    shutil.copy(NOME_MODELO_PADRAO, caminho_geral)
+                    if processar_arquivo(caminho_geral, df):
+                        with open(caminho_geral, "rb") as f:
+                            lista_arquivos.append({"nome": "GERAL_ROTAS.xlsx", "dados": f.read()})
 
-                        # --- GERA O GERAL ---
-                        caminho_geral = os.path.join(tmpdirname, "GERAL_ROTAS.xlsx")
-                        shutil.copy(NOME_MODELO_PADRAO, caminho_geral)
-                        
-                        if processar_arquivo(caminho_geral, df):
-                            # Lê o arquivo gerado para a memória (BytesIO)
-                            with open(caminho_geral, "rb") as f:
-                                dados_binarios = f.read()
-                            lista_temp_arquivos.append({
-                                "nome": "GERAL_ROTAS.xlsx",
-                                "dados": dados_binarios
-                            })
+                    # Por Transportadora
+                    for transp, dados in df.groupby(col_transp):
+                        if pd.isna(transp): continue
+                        nome_limpo = str(transp).replace("/", "-").replace("\\", "").strip()
+                        nome_arq = f"{nome_limpo}.xlsx"
+                        caminho_t = os.path.join(tmpdirname, nome_arq)
+                        shutil.copy(NOME_MODELO_PADRAO, caminho_t)
+                        if processar_arquivo(caminho_t, dados):
+                            with open(caminho_t, "rb") as f:
+                                lista_arquivos.append({"nome": nome_arq, "dados": f.read()})
 
-                        # --- GERA POR TRANSPORTADORA ---
-                        for transp, dados in df.groupby(col_transp):
-                            if pd.isna(transp): continue
-                            nome_arquivo = str(transp).replace("/", "-").replace("\\", "").strip() + ".xlsx"
-                            caminho_transp = os.path.join(tmpdirname, nome_arquivo)
-                            
-                            shutil.copy(NOME_MODELO_PADRAO, caminho_transp)
-                            if processar_arquivo(caminho_transp, dados):
-                                with open(caminho_transp, "rb") as f:
-                                    dados_binarios = f.read()
-                                lista_temp_arquivos.append({
-                                    "nome": nome_arquivo,
-                                    "dados": dados_binarios
-                                })
+                    st.session_state['arquivos_prontos'] = lista_arquivos
+                    st.success("Concluído!")
+                    st.rerun()
 
-                        # Salva tudo na sessão
-                        st.session_state['arquivos_prontos'] = lista_temp_arquivos
-                        st.success("Concluído!")
-                        st.rerun() # Recarrega a página para mostrar os botões
-
-    # --- ÁREA DE DOWNLOAD (FORA DO IF DO BOTÃO) ---
-    # Isso garante que os botões persistam na tela
+    # Área de Download e E-mail
     if st.session_state['arquivos_prontos']:
         st.divider()
         st.subheader("📂 Arquivos Gerados:")
         
         for item in st.session_state['arquivos_prontos']:
-            st.download_button(
-                label=f"📥 Baixar {item['nome']}",
-                data=item['dados'],
-                file_name=item['nome'],
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key=item['nome'] # Chave única para não dar conflito
-            )
+            c1, c2 = st.columns([3, 2])
+            nome_transp_key = item['nome'].replace(".xlsx", "")
+            
+            with c1:
+                st.download_button(
+                    label=f"📥 Baixar {item['nome']}",
+                    data=item['dados'],
+                    file_name=item['nome'],
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"dl_{item['nome']}"
+                )
+            
+            with c2:
+                # Se não for o geral, mostra o botão de e-mail
+                if nome_transp_key != "GERAL_ROTAS":
+                    destinatarios = contatos_dict.get(nome_transp_key.upper(), "")
+                    if destinatarios:
+                        link_mail = gerar_link_outlook(
+                            nome_transp_key, 
+                            st.session_state['data_carregamento'], 
+                            destinatarios
+                        )
+                        st.markdown(f'''
+                            <a href="{link_mail}" target="_blank" style="text-decoration: none;">
+                                <div style="background-color: #0078d4; color: white; padding: 8px 16px; 
+                                border-radius: 5px; text-align: center; font-weight: bold; font-size: 14px;">
+                                    📧 Preparar E-mail
+                                </div>
+                            </a>''', unsafe_allow_html=True)
+                    else:
+                        st.warning("E-mail não cadastrado")
 
 if __name__ == "__main__":
     main()
-
