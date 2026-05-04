@@ -37,19 +37,19 @@ def carregar_dicionario_emails():
     if not os.path.exists(RELACAO_EMAILS):
         return {}
     try:
+        # Tenta ler a primeira aba do arquivo Excel
         df_em = pd.read_excel(RELACAO_EMAILS)
-        # Padroniza nomes para evitar erros de digitação (maiúsculas e sem espaços extras)
         df_em['TRANSPORTADORA'] = df_em['TRANSPORTADORA'].astype(str).str.strip().str.upper()
         df_em['E-MAIL'] = df_em['E-MAIL'].astype(str).str.strip()
         
-        # Agrupa e-mails da mesma transportadora separados por ponto e vírgula
+        # Agrupa múltiplos e-mails da mesma transportadora separados por ponto e vírgula
         return df_em.groupby('TRANSPORTADORA')['E-MAIL'].apply(lambda x: ';'.join(x)).to_dict()
     except Exception as e:
         st.error(f"Erro ao carregar dicionário de e-mails: {e}")
         return {}
 
 def gerar_link_outlook(transportadora, data_carregamento, destinatarios):
-    """Gera o link de deeplink para o Outlook Web."""
+    """Gera o link de deeplink para o Outlook Web com codificação correta (%20)."""
     assunto = f"Zema - Previsão de Descarga {data_carregamento}"
     corpo = (
         "Prezados, Bom Dia!\n\n"
@@ -58,13 +58,17 @@ def gerar_link_outlook(transportadora, data_carregamento, destinatarios):
         "Obrigado."
     )
     
-    params = urllib.parse.urlencode({
-        'path': '/mail/action/compose',
-        'to': destinatarios,
-        'subject': assunto,
-        'body': corpo
-    })
-    return f"https://outlook.cloud.microsoft/mail/0/deeplink/compose?{params}"
+    # quote garante que espaços virem %20 e não o símbolo de '+'
+    assunto_u = urllib.parse.quote(assunto)
+    corpo_u = urllib.parse.quote(corpo)
+    dest_u = urllib.parse.quote(destinatarios)
+    
+    # Montagem manual da URL para controle total da codificação
+    link = (
+        f"https://outlook.cloud.microsoft/mail/0/deeplink/compose?"
+        f"path=%2Fmail%2Faction%2Fcompose&to={dest_u}&subject={assunto_u}&body={corpo_u}"
+    )
+    return link
 
 # ================= FUNÇÕES DE ESTILO EXCEL =================
 def copiar_estilo(celula_origem, celula_destino):
@@ -195,7 +199,7 @@ def main():
         st.error(f"ERRO: '{NOME_MODELO_PADRAO}' não encontrado.")
         return
 
-    # Inicializa estados
+    # Inicializa estados de sessão
     if 'arquivos_prontos' not in st.session_state:
         st.session_state['arquivos_prontos'] = []
     if 'data_carregamento' not in st.session_state:
@@ -219,11 +223,11 @@ def main():
 
                     try:
                         df = pd.read_excel(caminho_input)
-                        # Captura a data da primeira linha, primeira coluna para o e-mail
+                        # Extrai a data da primeira linha para o assunto do e-mail
                         st.session_state['data_carregamento'] = str(df.iloc[0, 0])[:10]
                         df.columns = [str(c).strip().lower() for c in df.columns]
                     except:
-                        st.error("Erro ao ler arquivo.")
+                        st.error("Erro ao ler arquivo de entrada.")
                         return
 
                     col_transp = next((c for c in df.columns if "transportadora" in c), None)
@@ -233,14 +237,14 @@ def main():
 
                     lista_arquivos = []
                     
-                    # Geral
+                    # 1. Processar Arquivo Geral
                     caminho_geral = os.path.join(tmpdirname, "GERAL_ROTAS.xlsx")
                     shutil.copy(NOME_MODELO_PADRAO, caminho_geral)
                     if processar_arquivo(caminho_geral, df):
                         with open(caminho_geral, "rb") as f:
                             lista_arquivos.append({"nome": "GERAL_ROTAS.xlsx", "dados": f.read()})
 
-                    # Por Transportadora
+                    # 2. Processar por Transportadora Individual
                     for transp, dados in df.groupby(col_transp):
                         if pd.isna(transp): continue
                         nome_limpo = str(transp).replace("/", "-").replace("\\", "").strip()
@@ -252,10 +256,10 @@ def main():
                                 lista_arquivos.append({"nome": nome_arq, "dados": f.read()})
 
                     st.session_state['arquivos_prontos'] = lista_arquivos
-                    st.success("Concluído!")
+                    st.success("Arquivos processados com sucesso!")
                     st.rerun()
 
-    # Área de Download e E-mail
+    # Exibição de Download e Botão de E-mail
     if st.session_state['arquivos_prontos']:
         st.divider()
         st.subheader("📂 Arquivos Gerados:")
@@ -274,7 +278,7 @@ def main():
                 )
             
             with c2:
-                # Se não for o geral, mostra o botão de e-mail
+                # O botão de e-mail aparece para transportadoras individuais cadastradas
                 if nome_transp_key != "GERAL_ROTAS":
                     destinatarios = contatos_dict.get(nome_transp_key.upper(), "")
                     if destinatarios:
@@ -286,12 +290,13 @@ def main():
                         st.markdown(f'''
                             <a href="{link_mail}" target="_blank" style="text-decoration: none;">
                                 <div style="background-color: #0078d4; color: white; padding: 8px 16px; 
-                                border-radius: 5px; text-align: center; font-weight: bold; font-size: 14px;">
+                                border-radius: 5px; text-align: center; font-weight: bold; font-size: 14px; 
+                                cursor: pointer; transition: 0.3s;">
                                     📧 Preparar E-mail
                                 </div>
                             </a>''', unsafe_allow_html=True)
                     else:
-                        st.warning("E-mail não cadastrado")
+                        st.info("E-mail não cadastrado")
 
 if __name__ == "__main__":
     main()
